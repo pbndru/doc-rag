@@ -1,0 +1,67 @@
+version: '3.8'
+
+services:
+  document-processor:
+    build:
+      context: ./services/document-processor
+      dockerfile: Dockerfile
+    ports:
+      - "8001:8001"
+    volumes:
+      - ./services/document-processor:/app
+      - ./documents:/app/documents
+    environment:
+      - VECTOR_DB_URL=http://vector-db:8080
+    depends_on:
+      - vector-db
+    restart: unless-stopped
+
+  vector-db:
+    image: semitechnologies/weaviate:1.22.4
+    ports:
+      - "8080:8080"
+    environment:
+      QUERY_DEFAULTS_LIMIT: 25
+      AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED: "true"
+      PERSISTENCE_DATA_PATH: "/var/lib/weaviate"
+      DEFAULT_VECTORIZER_MODULE: "none"
+      CLUSTER_HOSTNAME: "node1"
+    volumes:
+      - ./weaviate-data:/var/lib/weaviate
+    restart: unless-stopped
+
+  orchestrator:
+    build:
+      context: ./services/orchestrator
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./services/orchestrator:/app
+      - ./documents:/app/documents
+    environment:
+      - DOC_PROCESSOR_URL=http://document-processor:8001
+      - VECTOR_DB_URL=http://vector-db:8080
+    depends_on:
+      - document-processor
+      - vector-db
+    restart: unless-stopped
+
+  chat-ui:
+    build:
+      context: ./frontend/chat-ui
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./frontend/chat-ui:/app
+      - /app/node_modules
+    environment:
+      - REACT_APP_API_URL=http://localhost:8000
+    depends_on:
+      - orchestrator
+    restart: unless-stopped
+
+volumes:
+  document-storage:
+  vector-data:

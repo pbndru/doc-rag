@@ -6,6 +6,7 @@ function ChatInterface() {
   const [messages, setMessages] = useState([]);
   const [loading, setLoading] = useState(false);
   const [selectedDoc, setSelectedDoc] = useState(null);
+  const apiUrl = process.env.REACT_APP_API_URL || "http://localhost:8000";
 
   const handleSend = async () => {
     if (!query.trim()) return;
@@ -33,9 +34,19 @@ function ChatInterface() {
     setQuery("");
   };
 
-  const openDocument = (doc) => {
-    setSelectedDoc(doc);
+  const openDocument = async (doc) => {
+    try {
+      const resp = await axios.get(`${apiUrl}/document/${doc.filename}`, {
+        params: { highlight: doc.snippet }
+      });
+      setSelectedDoc({ ...doc, ...resp.data });
+    } catch (err) {
+      console.error(err);
+      setSelectedDoc({ ...doc, error: "Failed to load document" });
+    }
   };
+
+  // Upload functionality removed – documents are processed automatically on server startup
 
   return (
     <div style={{ display: "flex", height: "80vh", border: "1px solid #ccc" }}>
@@ -59,6 +70,7 @@ function ChatInterface() {
           ))}
           {loading && <div>Loading...</div>}
         </div>
+        {/* Upload functionality removed – documents are processed automatically on server startup */}
         <div style={{ display: "flex" }}>
           <input
             style={{ flex: 1, padding: "0.5rem" }}
@@ -79,8 +91,21 @@ function ChatInterface() {
         {selectedDoc ? (
           <div>
             <h4>{selectedDoc.filename}</h4>
-            <p>{selectedDoc.snippet}</p>
-            {/* In a real implementation, you would render the full document with highlighted text */}
+            {selectedDoc.error && <p style={{color: 'red'}}>{selectedDoc.error}</p>}
+            {(selectedDoc.type === 'pdf' || selectedDoc.type === 'txt') && selectedDoc.content && (() => {
+              let html = selectedDoc.content;
+              if (selectedDoc.highlight) {
+                const escaped = selectedDoc.highlight.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                const regex = new RegExp(`(${escaped})`, 'gi');
+                html = selectedDoc.content.replace(regex, '<mark>$1</mark>');
+              }
+              return <div style={{whiteSpace: 'pre-wrap', maxHeight: '500px', overflow: 'auto'}} dangerouslySetInnerHTML={{__html: html}} />;
+            })()}
+            {selectedDoc.type === 'docx' && (
+              <p>{selectedDoc.message || "DOCX preview not implemented yet."}</p>
+            )}
+            {/* Fallback for unknown types */}
+            {(!selectedDoc.type || selectedDoc.type === 'unknown') && <p>{selectedDoc.snippet}</p>}
           </div>
         ) : (
           <p>Select a document from search results to view it here.</p>

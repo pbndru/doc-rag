@@ -1,3 +1,9 @@
 fastapi
 uvicorn
+pydantic
+pdfplumber
+python-docx
+sentence-transformers
+weaviate-client
 httpx
+python-multipart

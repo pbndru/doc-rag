@@ -4,5 +4,5 @@ pydantic
 pdfplumber
 python-docx
 sentence-transformers
-faiss-cpu
-gunicorn
+weaviate-client
+httpx

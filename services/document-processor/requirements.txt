@@ -6,3 +6,5 @@ python-docx
 sentence-transformers
 weaviate-client
 httpx
+python-multipart
+PyPDF2

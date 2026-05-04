@@ -1,11 +1,17 @@
 import os
+import json
 import httpx
+import numpy as np
 from fastapi import FastAPI, UploadFile, HTTPException, Query
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
+from sentence_transformers import SentenceTransformer
 
 app = FastAPI()
+
+# Load sentence transformer model (same as document-processor)
+model = SentenceTransformer('all-MiniLM-L6-v2')
 
 app.add_middleware(
     CORSMiddleware,
@@ -25,23 +31,21 @@ VECTOR_DB_URL = os.getenv("VECTOR_DB_URL", "http://vector-db:8080")
 async def startup():
     async with httpx.AsyncClient() as client:
         # Define class Document if not present
-        schema = {
-            "classes": [
-                {
-                    "class": "Document",
-                    "properties": [
-                        {"name": "title", "dataType": ["string"]},
-                        {"name": "content", "dataType": ["text"]},
-                        {"name": "chunkIndex", "dataType": ["int"]}
-                    ]
-                }
+        class_obj = {
+            "class": "Document",
+            "properties": [
+                {"name": "title", "dataType": ["text"]},
+                {"name": "content", "dataType": ["text"]},
+                {"name": "chunkIndex", "dataType": ["int"]}
             ]
         }
         try:
-            resp = await client.post(f"{VECTOR_DB_URL}/v1/schema", json=schema)
-            resp.raise_for_status()
-        except Exception:
-            # Schema may already exist; ignore
+            resp = await client.post(f"{VECTOR_DB_URL}/v1/schema", json=class_obj)
+            # 422 means it already exists
+            if resp.status_code != 422:
+                resp.raise_for_status()
+        except Exception as e:
+            print(f"Schema creation info: {e}")
             pass
 
 # -------------------------------------------------------------------
@@ -79,25 +83,21 @@ async def query_documents(query: dict):
         raise HTTPException(status_code=400, detail="Query string missing")
     async with httpx.AsyncClient() as client:
         try:
-            graphql_query = f'''
-            {{
-              Get {{
-                Document(nearText:{{concepts:["{user_query}"]}} limit:5) {{
-                  title
-                  content
-                  chunkIndex
-                  _additional {{
-                    distance
-                  }}
-                }}
-              }}
-            '''
+            # Compute query vector with same model used by document-processor
+            embedding = model.encode([user_query])[0].tolist()
+            vector_str = json.dumps(embedding)
+            graphql_query = (
+                '{ Get { Document (nearVector: { vector: ' + vector_str + ' } limit: 5) { '
+                'title content chunkIndex _additional { distance } } } }'
+            )
             resp = await client.post(
                 f"{VECTOR_DB_URL}/v1/graphql",
                 json={"query": graphql_query}
             )
             resp.raise_for_status()
             data = resp.json()
+            if "errors" in data:
+                raise HTTPException(status_code=500, detail=str(data["errors"]))
             hits = data.get("data", {}).get("Get", {}).get("Document", [])
             answer = " ".join([hit.get("content", "") for hit in hits][:3])
             citations = [

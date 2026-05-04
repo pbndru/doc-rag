@@ -34,6 +34,7 @@ async def ingest_document(file: UploadFile):
                 resp.raise_for_status()
         return JSONResponse(content={"status": "processed", "chunks": len(chunks)})
     except Exception as e:
+        print(f"Error during ingestion: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":

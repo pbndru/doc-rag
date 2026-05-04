@@ -26,6 +26,8 @@ services:
       PERSISTENCE_DATA_PATH: "/var/lib/weaviate"
       DEFAULT_VECTORIZER_MODULE: "none"
       CLUSTER_HOSTNAME: "node1"
+      DISK_USE_READ_ONLY_PERCENTAGE: "98"
+      DISK_USE_WARNING_PERCENTAGE: "95"
     volumes:
       - ./weaviate-data:/var/lib/weaviate
     restart: unless-stopped
@@ -52,12 +54,11 @@ services:
       context: ./frontend/chat-ui
       dockerfile: Dockerfile
       args:
-        - REACT_APP_API_URL=http://orchestrator:8000
+        - REACT_APP_API_URL=http://localhost:8000
     ports:
       - "3000:80"
-    # No volume mounts – serve built static files
     environment:
-      - REACT_APP_API_URL=http://orchestrator:8000
+      - REACT_APP_API_URL=http://localhost:8000
     depends_on:
       - orchestrator
     restart: unless-stopped

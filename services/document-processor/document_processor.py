@@ -1,4 +1,5 @@
 import os
+import io
 import tempfile
 from typing import List
 import pdfplumber
@@ -15,8 +16,9 @@ def extract_text_from_file(file_content: bytes, filename: str) -> List[str]:
     if filename.lower().endswith('.pdf'):
         with pdfplumber.open(io.BytesIO(file_content)) as pdf:
             for page in pdf.pages:
-                if page.text.strip():
-                    chunks.append(page.text[:1000])  # Chunk size limit
+                extracted_text = page.extract_text()
+                if extracted_text and extracted_text.strip():
+                    chunks.append(extracted_text[:1000])  # Chunk size limit
     elif filename.lower().endswith('.docx'):
         with docx.Document(io.BytesIO(file_content)) as doc:
             full_text = '\n'.join([p.text for p in doc.paragraphs])

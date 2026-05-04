@@ -126,10 +126,11 @@ async def get_document(filename: str, highlight: str = Query(None)):
         return {"filename": filename, "content": content, "highlight": highlight, "type": "txt"}
     elif filename.lower().endswith('.pdf'):
         try:
-            from PyPDF2 import PdfReader
-            reader = PdfReader(filepath)
-            text = "".join(page.extract_text() or "" for page in reader.pages)
+            import pdfplumber
+            with pdfplumber.open(filepath) as pdf:
+                text = "".join(page.extract_text() or "" for page in pdf.pages)
         except Exception as e:
+            print(f"Error retrieving document {filename}: {e}")
             raise HTTPException(status_code=500, detail=f"PDF parsing error: {e}")
         return {"filename": filename, "content": text, "highlight": highlight, "type": "pdf"}
     else:

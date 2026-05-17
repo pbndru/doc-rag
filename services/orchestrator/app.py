@@ -106,6 +106,16 @@ async def startup_event():
 
 async def watcher():
     print("Watcher started", flush=True)
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        # Initial population of processed_files from DB
+        docs_path = "/app/documents"
+        if os.path.isdir(docs_path):
+            for filename in os.listdir(docs_path):
+                if filename.lower().endswith(('.pdf', '.docx', '.txt')):
+                    if await check_if_file_exists_in_db(filename, client):
+                        print(f"File {filename} already in DB, skipping.", flush=True)
+                        processed_files.add(filename)
+
     while True:
         try:
             async with httpx.AsyncClient(timeout=60.0) as client:
@@ -216,22 +226,21 @@ tools = [search_documents, read_document_content]
 # -------------------------------------------------------------------
 
 prompt = ChatPromptTemplate.from_messages([
-    ("system", """You are an Agentic RAG assistant. Your goal is to answer user questions accurately using the provided tools.
+    ("system", """You are a focused RAG assistant. Answer queries using the search tools.
     
-    GUIDELINES:
-    1. **Relational Search:** If a document mentions another document, policy, or entity that seems relevant but isn't fully explained, use the tools to find that information. 
-    2. **Single Search:** If the information is clearly found in the first search, provide a concise and complete answer immediately.
-    3. **Accuracy:** Only answer based on the information found in the documents. If you cannot find the answer, say so.
-    4. **Citations:** Always mention which documents you used to form your answer.
-    
-    Use the tools available to you to gather all necessary information before providing a final answer."""),
+    RULES:
+    1. **Search First:** Always use `search_documents` for your initial action.
+    2. **Be Direct:** If the answer is in the search results, provide it immediately.
+    3. **Relational Leads:** Only use `read_document_content` if a search result explicitly mentions another file or policy needed to answer the query.
+    4. **No Citations Header:** Don't write a "References" section; just mention source filenames in your text.
+    5. **Concise:** Keep answers brief and factual."""),
     MessagesPlaceholder(variable_name="chat_history"),
     ("user", "{input}"),
     MessagesPlaceholder(variable_name="agent_scratchpad"),
 ])
 
 agent = create_openai_functions_agent(llm, tools, prompt)
-agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=True)
+agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=True, return_intermediate_steps=True)
 
 # -------------------------------------------------------------------
 # Query – search the vector store (Weaviate)
@@ -244,26 +253,47 @@ async def query_documents(query: dict):
     
     try:
         # Run the agent
-        # Note: We are using an empty chat history for now as the endpoint is stateless
         result = await agent_executor.ainvoke({
             "input": user_query,
             "chat_history": []
         })
         
         answer = result.get("output", "I'm sorry, I couldn't process that request.")
+        intermediate_steps = result.get("intermediate_steps", [])
         
-        # Simple citation extraction: look for filenames in the answer
-        # In a more robust system, we'd track tool calls.
         citations = []
-        doc_path = "/app/documents"
-        if os.path.isdir(doc_path):
-            available_files = os.listdir(doc_path)
-            for filename in available_files:
-                if filename in answer:
-                    citations.append({"filename": filename, "snippet": f"Referenced in answer."})
-        
-        # If no citations found but agent provided an answer, we might want to be more clever.
-        # But for now, this simple check works if the agent follows the prompt.
+        seen_citations = set()
+
+        for action, observation in intermediate_steps:
+            if action.tool == "search_documents":
+                # Parse the observation which is a string of results separated by ---
+                parts = observation.split("\n---\n")
+                for part in parts:
+                    if "Source: " in part and "Content: " in part:
+                        lines = part.split("\n")
+                        filename = lines[0].replace("Source: ", "").strip()
+                        content = "\n".join(lines[1:]).replace("Content: ", "").strip()
+                        
+                        # Only add if relevant to the final answer (heuristic: filename appears in answer or it was a search result)
+                        # To be safe and helpful, we add it if it hasn't been added yet.
+                        citation_key = (filename, content[:100])
+                        if citation_key not in seen_citations:
+                            citations.append({
+                                "filename": filename, 
+                                "snippet": content[:300] # Use a reasonable snippet for highlighting
+                            })
+                            seen_citations.add(citation_key)
+            
+            elif action.tool == "read_document_content":
+                filename = action.tool_input
+                if isinstance(filename, dict):
+                    filename = filename.get("filename", str(filename))
+                
+                if filename not in [c["filename"] for c in citations]:
+                    citations.append({
+                        "filename": filename,
+                        "snippet": observation[:300] # Use the start of the document as a fallback snippet
+                    })
 
         return {"answer": answer, "citations": citations}
         

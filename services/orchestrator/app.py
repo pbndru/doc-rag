@@ -225,15 +225,26 @@ tools = [search_documents, read_document_content]
 # Agent Configuration
 # -------------------------------------------------------------------
 
+def get_available_docs():
+    docs_path = "/app/documents"
+    if os.path.isdir(docs_path):
+        return ", ".join([f for f in os.listdir(docs_path) if f.lower().endswith(('.pdf', '.docx', '.txt'))])
+    return "No documents available."
+
 prompt = ChatPromptTemplate.from_messages([
-    ("system", """You are a focused RAG assistant. Answer queries using the search tools.
+    ("system", f"""You are a focused RAG assistant. You MUST use the provided tools to answer queries.
     
-    RULES:
-    1. **Search First:** Always use `search_documents` for your initial action.
-    2. **Be Direct:** If the answer is in the search results, provide it immediately.
-    3. **Relational Leads:** Only use `read_document_content` if a search result explicitly mentions another file or policy needed to answer the query.
-    4. **No Citations Header:** Don't write a "References" section; just mention source filenames in your text.
-    5. **Concise:** Keep answers brief and factual."""),
+    AVAILABLE DOCUMENTS: {get_available_docs()}
+    
+    STRICT RULES:
+    1. **Search First:** Always call `search_documents` first.
+    2. **Tool Output Only:** Use ONLY information from the tools.
+    3. **FINAL ANSWER FORMAT:** 
+       - Natural language ONLY.
+       - NEVER mention tool names like `search_documents` or `read_document_content`.
+       - NEVER use backticks around tool names.
+       - Mention filenames like 'club-lloyds-benefits.pdf' when you use them.
+    4. **Concise:** Be brief and direct."""),
     MessagesPlaceholder(variable_name="chat_history"),
     ("user", "{input}"),
     MessagesPlaceholder(variable_name="agent_scratchpad"),
@@ -261,39 +272,57 @@ async def query_documents(query: dict):
         answer = result.get("output", "I'm sorry, I couldn't process that request.")
         intermediate_steps = result.get("intermediate_steps", [])
         
+        # Clean answer: strip any hallucinated tool calls in backticks
+        import re
+        answer = re.sub(r'`(search_documents|read_document_content)\(.*?\)`', '', answer).strip()
+        
         citations = []
-        seen_citations = set()
+        seen_filenames = set()
+        filename_to_snippet = {} # Track the best snippet found for each file
 
+        # 1. Extract from tool observations
         for action, observation in intermediate_steps:
             if action.tool == "search_documents":
-                # Parse the observation which is a string of results separated by ---
                 parts = observation.split("\n---\n")
                 for part in parts:
-                    if "Source: " in part and "Content: " in part:
-                        lines = part.split("\n")
+                    if "Source: " in part:
+                        lines = [l for l in part.split("\n") if l.strip()]
                         filename = lines[0].replace("Source: ", "").strip()
                         content = "\n".join(lines[1:]).replace("Content: ", "").strip()
                         
-                        # Only add if relevant to the final answer (heuristic: filename appears in answer or it was a search result)
-                        # To be safe and helpful, we add it if it hasn't been added yet.
-                        citation_key = (filename, content[:100])
-                        if citation_key not in seen_citations:
-                            citations.append({
-                                "filename": filename, 
-                                "snippet": content[:300] # Use a reasonable snippet for highlighting
-                            })
-                            seen_citations.add(citation_key)
+                        # Store the first (usually most relevant) snippet for this file
+                        if filename not in filename_to_snippet:
+                            filename_to_snippet[filename] = content[:300]
             
             elif action.tool == "read_document_content":
                 filename = action.tool_input
                 if isinstance(filename, dict):
                     filename = filename.get("filename", str(filename))
                 
-                if filename not in [c["filename"] for c in citations]:
+                if filename not in filename_to_snippet:
+                    filename_to_snippet[filename] = observation[:300]
+
+        # 2. Match citations referenced in the final answer
+        docs_dir = "/app/documents"
+        if os.path.isdir(docs_dir):
+            for filename in os.listdir(docs_dir):
+                # If filename is mentioned in answer, we want a citation button
+                if filename in answer:
+                    snippet = filename_to_snippet.get(filename, "Referenced in document.")
                     citations.append({
                         "filename": filename,
-                        "snippet": observation[:300] # Use the start of the document as a fallback snippet
+                        "snippet": snippet
                     })
+                    seen_filenames.add(filename)
+
+        # 3. Add any files the agent searched but didn't explicitly name in the answer (helpful context)
+        for filename, snippet in filename_to_snippet.items():
+            if filename not in seen_filenames:
+                citations.append({
+                    "filename": filename,
+                    "snippet": snippet
+                })
+                seen_filenames.add(filename)
 
         return {"answer": answer, "citations": citations}
         

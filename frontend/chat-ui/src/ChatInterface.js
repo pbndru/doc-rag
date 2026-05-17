@@ -53,7 +53,7 @@ function ChatInterface() {
         if (mark) {
           mark.scrollIntoView({ behavior: 'smooth', block: 'center' });
         }
-      }, 300);
+      }, 500); // Increased timeout to ensure rendering is complete
     } catch (err) {
       console.error(err);
       setSelectedDoc({ ...doc, error: "Failed to load document content from server." });
@@ -242,8 +242,11 @@ function ChatInterface() {
               }}>
                 {(selectedDoc.type === 'pdf' || selectedDoc.type === 'txt') && selectedDoc.content ? (() => {
                   let html = selectedDoc.content;
-                  if (selectedDoc.highlight) {
-                    const escaped = selectedDoc.highlight.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                  if (selectedDoc.highlight && selectedDoc.highlight !== "Referenced in document.") {
+                    // Fuzzy match: replace spaces/newlines in highlight with a regex that matches any whitespace
+                    const escaped = selectedDoc.highlight
+                      .replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+                      .replace(/\s+/g, '\\s+');
                     const regex = new RegExp(`(${escaped})`, 'gi');
                     html = html.replace(regex, '<mark style="background-color: #fefcbf; padding: 2px; border-radius: 2px; border-bottom: 2px solid #ecc94b;">$1</mark>');
                   }

@@ -225,34 +225,48 @@ tools = [search_documents, read_document_content]
 # Agent Configuration
 # -------------------------------------------------------------------
 
+from langchain.agents import AgentExecutor, create_react_agent
+from langchain_core.prompts import PromptTemplate
+
+# -------------------------------------------------------------------
+# Agent Configuration
+# -------------------------------------------------------------------
+
 def get_available_docs():
     docs_path = "/app/documents"
     if os.path.isdir(docs_path):
         return ", ".join([f for f in os.listdir(docs_path) if f.lower().endswith(('.pdf', '.docx', '.txt'))])
     return "No documents available."
 
-prompt = ChatPromptTemplate.from_messages([
-    ("system", f"""You are a focused RAG assistant. You MUST use the provided tools to answer queries.
-    
-    AVAILABLE DOCUMENTS: {get_available_docs()}
-    
-    STRICT RULES:
-    1. **Search First:** Always call `search_documents` first.
-    2. **Tool Output Only:** Use ONLY information from the tools.
-    3. **FINAL ANSWER FORMAT:** 
-       - Natural language ONLY.
-       - NEVER mention tool names like `search_documents` or `read_document_content`.
-       - NEVER use backticks around tool names.
-       - Mention filenames like 'club-lloyds-benefits.pdf' when you use them.
-    4. **Concise:** Be brief and direct."""),
-    MessagesPlaceholder(variable_name="chat_history"),
-    ("user", "{input}"),
-    MessagesPlaceholder(variable_name="agent_scratchpad"),
-])
+template = """Answer the following questions as best you can. You have access to the following tools:
 
-agent = create_openai_functions_agent(llm, tools, prompt)
-agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=True, return_intermediate_steps=True)
+{tools}
 
+Use the following format:
+
+Question: the input question you must answer
+Thought: you should always think about what to do
+Action: the action to take, should be one of [{tool_names}]
+Action Input: the input to the action
+Observation: the result of the action
+... (this Thought/Action/Action Input/Observation can repeat N times)
+Thought: I now know the final answer
+Final Answer: the final answer to the original input question
+
+STRICT RULES:
+1. ALWAYS use the search_documents tool first.
+2. NEVER mention tool names or tool syntax in your Final Answer.
+3. Mention the exact filename (e.g. club-lloyds-benefits.pdf) in your Final Answer.
+
+Available Documents: {available_docs}
+
+Question: {input}
+Thought: {agent_scratchpad}"""
+
+prompt = PromptTemplate.from_template(template).partial(available_docs=get_available_docs())
+
+agent = create_react_agent(llm, tools, prompt)
+agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=True, return_intermediate_steps=True, handle_parsing_errors=True)
 # -------------------------------------------------------------------
 # Query – search the vector store (Weaviate)
 # -------------------------------------------------------------------

@@ -44,9 +44,19 @@ services:
     environment:
       - DOC_PROCESSOR_URL=http://document-processor:8001
       - VECTOR_DB_URL=http://vector-db:8080
+      - OLLAMA_URL=http://ollama:11434
     depends_on:
       - document-processor
       - vector-db
+      - ollama
+    restart: unless-stopped
+
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
     restart: unless-stopped
 
   chat-ui:
@@ -66,3 +76,4 @@ services:
 volumes:
   document-storage:
   vector-data:
+  ollama-data:

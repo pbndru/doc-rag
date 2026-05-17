@@ -7,3 +7,6 @@ sentence-transformers
 weaviate-client
 httpx
 python-multipart
+langchain==0.1.20
+langchain-openai==0.1.7
+langchain-community==0.0.38

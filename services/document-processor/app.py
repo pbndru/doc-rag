@@ -7,7 +7,7 @@ from document_processor import extract_text_from_file
 
 app = FastAPI()
 VECTOR_DB_URL = os.getenv("VECTOR_DB_URL", "http://vector-db:8080")
-model = SentenceTransformer('all-MiniLM-L6-v2')
+model = SentenceTransformer('all-mpnet-base-v2')
 
 @app.post("/ingest")
 async def ingest_document(file: UploadFile):

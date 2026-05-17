@@ -7,11 +7,27 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from sentence_transformers import SentenceTransformer, util
+from langchain_openai import ChatOpenAI
+from langchain.agents import AgentExecutor, create_openai_functions_agent
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.tools import tool
+from langchain.memory import ConversationBufferMemory
 
 app = FastAPI()
 
-# Load sentence transformer model (same as document-processor)
-model = SentenceTransformer('all-MiniLM-L6-v2')
+# Load sentence transformer model (accurate version)
+model = SentenceTransformer('all-mpnet-base-v2')
+
+OLLAMA_URL = os.getenv("OLLAMA_URL", "http://ollama:11434")
+LLM_MODEL = os.getenv("LLM_MODEL", "llama3")
+
+# Initialize LLM (Ollama via OpenAI-compatible API)
+llm = ChatOpenAI(
+    base_url=f"{OLLAMA_URL}/v1",
+    api_key="ollama", # Placeholder for Ollama
+    model=LLM_MODEL,
+    temperature=0
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -24,15 +40,54 @@ app.add_middleware(
 DOC_PROCESSOR_URL = os.getenv("DOC_PROCESSOR_URL", "http://document-processor:8001")
 VECTOR_DB_URL = os.getenv("VECTOR_DB_URL", "http://vector-db:8080")
 
+processed_files = set()
+
+async def check_if_file_exists_in_db(filename: str, client: httpx.AsyncClient):
+    """Check if a file with the given title already exists in Weaviate."""
+    graphql_query = {
+        "query": f'{{ Get {{ Document(where: {{ path: ["title"], operator: Equal, valueText: "{filename}" }}) {{ title }} }} }}'
+    }
+    try:
+        resp = await client.post(f"{VECTOR_DB_URL}/v1/graphql", json=graphql_query)
+        resp.raise_for_status()
+        data = resp.json()
+        results = data.get("data", {}).get("Get", {}).get("Document", [])
+        return len(results) > 0
+    except Exception as e:
+        print(f"Error checking DB for {filename}: {e}", flush=True)
+        return False
+
+async def ingest_file(filename: str, client: httpx.AsyncClient):
+    """Send a file to the document-processor for ingestion."""
+    filepath = os.path.join("/app/documents", filename)
+    if not os.path.exists(filepath):
+        print(f"File {filepath} not found for ingestion.", flush=True)
+        return
+
+    try:
+        with open(filepath, "rb") as f:
+            files = {"file": (filename, f)}
+            resp = await client.post(f"{DOC_PROCESSOR_URL}/ingest", files=files, timeout=60.0)
+            resp.raise_for_status()
+            print(f"Successfully ingested {filename}", flush=True)
+            processed_files.add(filename)
+    except Exception as e:
+        print(f"Error ingesting {filename}: {e}", flush=True)
+
+import asyncio
+import sys
+
 # -------------------------------------------------------------------
-# Ensure Weaviate schema exists (create if needed)
+# Ensure Weaviate schema exists and start watcher
 # -------------------------------------------------------------------
 @app.on_event("startup")
-async def startup():
+async def startup_event():
+    print("Orchestrator starting up...", flush=True)
     async with httpx.AsyncClient() as client:
         # Define class Document if not present
         class_obj = {
             "class": "Document",
+            "vectorizer": "none",
             "properties": [
                 {"name": "title", "dataType": ["text"]},
                 {"name": "content", "dataType": ["text"]},
@@ -41,85 +96,142 @@ async def startup():
         }
         try:
             resp = await client.post(f"{VECTOR_DB_URL}/v1/schema", json=class_obj)
-            # 422 means it already exists
-            if resp.status_code != 422:
-                resp.raise_for_status()
+            print(f"Schema creation response: {resp.status_code}", flush=True)
         except Exception as e:
-            print(f"Schema creation info: {e}")
-            pass
+            print(f"Schema creation error: {e}", flush=True)
 
-import asyncio
-
-# Global set to track processed files in this session to avoid redundant checks
-# In a production app, this would be persisted or checked against the DB
-processed_files = set()
-
-async def check_if_file_exists_in_db(filename: str, client: httpx.AsyncClient) -> bool:
-    """Query Weaviate to see if this document already has any chunks."""
-    graphql_query = {
-        "query": f'{{ Get {{ Document(where: {{ path: ["title"], operator: Equal, valueText: "{filename}" }}, limit: 1) {{ title }} }} }}'
-    }
-    try:
-        resp = await client.post(f"{VECTOR_DB_URL}/v1/graphql", json=graphql_query)
-        if resp.status_code == 200:
-            data = resp.json()
-            hits = data.get("data", {}).get("Get", {}).get("Document", [])
-            return len(hits) > 0
-    except Exception:
-        pass
-    return False
-
-async def ingest_file(filename: str, client: httpx.AsyncClient):
-    """Send a single file to the document-processor."""
-    filepath = os.path.join("documents", filename)
-    try:
-        with open(filepath, "rb") as f:
-            files = {"file": (filename, f, "application/octet-stream")}
-            resp = await client.post(f"{DOC_PROCESSOR_URL}/ingest", files=files)
-            resp.raise_for_status()
-            print(f"Successfully ingested {filename}")
-            processed_files.add(filename)
-    except Exception as e:
-        print(f"Failed to ingest {filename}: {e}")
-
-@app.on_event("startup")
-async def start_document_watcher():
-    """Background task that polls the documents folder."""
-    async def watcher():
-        while True:
-            try:
-                async with httpx.AsyncClient() as client:
-                    docs_path = os.path.abspath("documents")
-                    if os.path.isdir(docs_path):
-                        for filename in os.listdir(docs_path):
-                            if filename.startswith('.'): continue
-                            
-                            # Skip if already processed in this session
-                            if filename in processed_files:
-                                continue
-                                
-                            # Check DB if not sure
-                            if await check_if_file_exists_in_db(filename, client):
-                                processed_files.add(filename)
-                                continue
-                                
-                            # New file! Ingest it
-                            await ingest_file(filename, client)
-            except Exception as e:
-                print(f"Watcher error: {e}")
-            
-            # Check every 10 seconds
-            await asyncio.sleep(10)
-    
-    # Run watcher as a background task
+    # Start watcher
     asyncio.create_task(watcher())
+    print("Watcher task created", flush=True)
+
+async def watcher():
+    print("Watcher started", flush=True)
+    while True:
+        try:
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                docs_path = "/app/documents" # Explicit path
+                if os.path.isdir(docs_path):
+                    files = os.listdir(docs_path)
+                    for filename in files:
+                        if filename.startswith('.'): continue
+                        
+                        if filename in processed_files:
+                            continue
+                            
+                        if await check_if_file_exists_in_db(filename, client):
+                            print(f"File {filename} already in DB, skipping.", flush=True)
+                            processed_files.add(filename)
+                            continue
+                            
+                        print(f"Found new file: {filename}. Ingesting...", flush=True)
+                        await ingest_file(filename, client)
+                else:
+                    print(f"Documents directory not found at {docs_path}", flush=True)
+        except Exception as e:
+            print(f"Watcher error: {e}", flush=True)
+        
+        await asyncio.sleep(10)
 
 # -------------------------------------------------------------------
-# On startup, ingest all files present in the ``documents`` folder.
-# This replaces the manual ``/upload`` endpoint – files added to ``/documents``
-# on the host are automatically processed when the service starts.
+# Tools for the Agent
 # -------------------------------------------------------------------
-# (Removing the old ingest_documents_on_startup as the watcher handles it now)
+
+@tool
+async def search_documents(query: str):
+    """Search for relevant document snippets based on a natural language query. 
+    Use this for initial discovery and finding specific details.
+    """
+    async with httpx.AsyncClient() as client:
+        # Compute query vector
+        embedding = model.encode([query])[0].tolist()
+        
+        graphql_query = {
+            "query": """
+            {
+              Get {
+                Document (
+                  hybrid: {
+                    query: %s,
+                    vector: %s,
+                    alpha: 0.5
+                  }
+                  limit: 5
+                ) {
+                  title
+                  content
+                  _additional { score }
+                }
+              }
+            }
+            """ % (json.dumps(query), json.dumps(embedding))
+        }
+        
+        resp = await client.post(f"{VECTOR_DB_URL}/v1/graphql", json=graphql_query)
+        resp.raise_for_status()
+        data = resp.json()
+        hits = data.get("data", {}).get("Get", {}).get("Document", [])
+        
+        if not hits:
+            return "No relevant information found."
+        
+        results = []
+        for hit in hits:
+            results.append(f"Source: {hit['title']}\nContent: {hit['content']}")
+        
+        return "\n---\n".join(results)
+
+@tool
+async def read_document_content(filename: str):
+    """Retrieve the full text content of a specific document by its filename.
+    Use this when a search result mentions another document or when you need more context from a known file.
+    """
+    filepath = os.path.join("documents", filename)
+    if not os.path.exists(filepath):
+        return f"Error: Document '{filename}' not found."
+
+    if filename.lower().endswith('.txt'):
+        with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+            return f.read()
+    elif filename.lower().endswith('.pdf'):
+        try:
+            import pdfplumber
+            with pdfplumber.open(filepath) as pdf:
+                return "".join(page.extract_text() or "" for page in pdf.pages)
+        except Exception as e:
+            return f"Error reading PDF {filename}: {e}"
+    elif filename.lower().endswith('.docx'):
+        try:
+            import docx
+            doc = docx.Document(filepath)
+            return "\n".join([para.text for para in doc.paragraphs])
+        except Exception as e:
+            return f"Error reading DOCX {filename}: {e}"
+    else:
+        return f"Unsupported file type for {filename}"
+
+tools = [search_documents, read_document_content]
+
+# -------------------------------------------------------------------
+# Agent Configuration
+# -------------------------------------------------------------------
+
+prompt = ChatPromptTemplate.from_messages([
+    ("system", """You are an Agentic RAG assistant. Your goal is to answer user questions accurately using the provided tools.
+    
+    GUIDELINES:
+    1. **Relational Search:** If a document mentions another document, policy, or entity that seems relevant but isn't fully explained, use the tools to find that information. 
+    2. **Single Search:** If the information is clearly found in the first search, provide a concise and complete answer immediately.
+    3. **Accuracy:** Only answer based on the information found in the documents. If you cannot find the answer, say so.
+    4. **Citations:** Always mention which documents you used to form your answer.
+    
+    Use the tools available to you to gather all necessary information before providing a final answer."""),
+    MessagesPlaceholder(variable_name="chat_history"),
+    ("user", "{input}"),
+    MessagesPlaceholder(variable_name="agent_scratchpad"),
+])
+
+agent = create_openai_functions_agent(llm, tools, prompt)
+agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=True)
 
 # -------------------------------------------------------------------
 # Query – search the vector store (Weaviate)
@@ -129,60 +241,35 @@ async def query_documents(query: dict):
     user_query = query.get("query")
     if not user_query:
         raise HTTPException(status_code=400, detail="Query string missing")
-    async with httpx.AsyncClient() as client:
-        try:
-            # Compute query vector with same model used by document-processor
-            embedding = model.encode([user_query])[0].tolist()
-            vector_str = json.dumps(embedding)
-            graphql_query = (
-                '{ Get { Document (nearVector: { vector: ' + vector_str + ' } limit: 5) { '
-                'title content chunkIndex _additional { distance } } } }'
-            )
-            resp = await client.post(
-                f"{VECTOR_DB_URL}/v1/graphql",
-                json={"query": graphql_query}
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            if "errors" in data:
-                raise HTTPException(status_code=500, detail=str(data["errors"]))
-            hits = data.get("data", {}).get("Get", {}).get("Document", [])
-            
-            if not hits:
-                return {"answer": "I couldn't find any relevant information in the documents.", "citations": []}
+    
+    try:
+        # Run the agent
+        # Note: We are using an empty chat history for now as the endpoint is stateless
+        result = await agent_executor.ainvoke({
+            "input": user_query,
+            "chat_history": []
+        })
+        
+        answer = result.get("output", "I'm sorry, I couldn't process that request.")
+        
+        # Simple citation extraction: look for filenames in the answer
+        # In a more robust system, we'd track tool calls.
+        citations = []
+        doc_path = "/app/documents"
+        if os.path.isdir(doc_path):
+            available_files = os.listdir(doc_path)
+            for filename in available_files:
+                if filename in answer:
+                    citations.append({"filename": filename, "snippet": f"Referenced in answer."})
+        
+        # If no citations found but agent provided an answer, we might want to be more clever.
+        # But for now, this simple check works if the agent follows the prompt.
 
-            # Smart Snippet Extraction:
-            # Instead of dumping all chunks, let's find the most relevant sentences.
-            all_content = "\n".join([hit.get("content", "") for hit in hits[:3]])
-            # Simple sentence splitting
-            sentences = [s.strip() for s in all_content.replace('\n', ' ').split('. ') if len(s.strip()) > 10]
-            
-            if sentences:
-                query_embedding = model.encode(user_query, convert_to_tensor=True)
-                sentence_embeddings = model.encode(sentences, convert_to_tensor=True)
-                cosine_scores = util.cos_sim(query_embedding, sentence_embeddings)[0]
-                
-                # Get indices of top 3 sentences
-                top_results = np.argpartition(-cosine_scores.cpu(), range(min(len(sentences), 3)))[:3]
-                relevant_sentences = [sentences[i] for i in top_results if cosine_scores[i] > 0.3]
-                
-                if relevant_sentences:
-                    # Sort them by their original order in the text to maintain some flow
-                    relevant_sentences.sort(key=lambda x: sentences.index(x))
-                    answer = "\n\n".join(relevant_sentences)
-                else:
-                    # Fallback to the first chunk if no sentence is highly relevant
-                    answer = hits[0].get("content", "")[:500] + "..."
-            else:
-                answer = hits[0].get("content", "")[:500] + "..."
-
-            citations = [
-                {"filename": hit.get("title", "unknown"), "snippet": hit.get("content", "")[:200]}
-                for hit in hits
-            ]
-            return {"answer": answer, "citations": citations}
-        except httpx.HTTPError as e:
-            raise HTTPException(status_code=502, detail=str(e))
+        return {"answer": answer, "citations": citations}
+        
+    except Exception as e:
+        print(f"Agent execution error: {e}", flush=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
 # -------------------------------------------------------------------
 # Serve static documents and document content with highlighting
